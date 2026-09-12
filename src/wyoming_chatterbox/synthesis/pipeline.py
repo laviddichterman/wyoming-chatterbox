@@ -193,7 +193,9 @@ class SynthesisPipeline:
         return make_silence(duration, self._backend.sample_rate)
 
     def _resolve_voice(self, voice: str | None) -> str | None:
-        if not voice or self._voice_manager is None:
+        # "default" is the synthetic Wyoming voice advertised for the
+        # model's built-in voice. It is not a reference WAV filename.
+        if not voice or voice == "default" or self._voice_manager is None:
             return None
         try:
             return str(self._voice_manager.get_voice_path(voice))
