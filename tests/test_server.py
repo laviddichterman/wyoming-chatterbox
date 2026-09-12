@@ -12,7 +12,14 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
 from wyoming.info import Describe, Info, SelectProgram
 from wyoming.server import AsyncTcpServer
-from wyoming.tts import Synthesize, SynthesizeVoice
+from wyoming.tts import (
+    Synthesize,
+    SynthesizeChunk,
+    SynthesizeStart,
+    SynthesizeStop,
+    SynthesizeStopped,
+    SynthesizeVoice,
+)
 
 from wyoming_chatterbox.config import Settings
 from wyoming_chatterbox.server.handler import ChatterboxEventHandler
@@ -36,6 +43,9 @@ def server_settings(tmp_path) -> Settings:
         chatterbox_device="cpu",
         chatterbox_preload=False,
         chatterbox_streaming_mode="segmented",
+        chatterbox_segment_min_chars=8,
+        chatterbox_segment_target_chars=24,
+        chatterbox_segment_max_chars=80,
         chatterbox_voices_dir=str(voices),
         chatterbox_period_pause_ms=0,
         chatterbox_comma_pause_ms=0,
@@ -130,5 +140,215 @@ async def test_select_program_then_synthesize(server_settings):
                     saw_stop = True
                     break
             assert saw_stop
+    finally:
+        await _shutdown(server)
+
+
+async def test_streaming_input_emits_audio_before_stop(server_settings):
+    """Streaming text should synthesize complete phrases immediately."""
+
+    server, port, backend = await _start_server(server_settings)
+
+    try:
+        async with AsyncTcpClient(
+            "127.0.0.1",
+            port,
+        ) as client:
+
+            # Begin the streaming Wyoming TTS transaction.
+            await client.write_event(
+                SynthesizeStart().event()
+            )
+
+            event = await asyncio.wait_for(
+                client.read_event(),
+                timeout=5,
+            )
+
+            assert AudioStart.is_type(
+                event.type
+            )
+
+            # Phrase 1 is complete, so it should be synthesized immediately
+            # without waiting for SynthesizeStop.
+            await client.write_event(
+                SynthesizeChunk(
+                    text="Hello world. "
+                ).event()
+            )
+
+            saw_audio_before_stop = False
+
+            for _ in range(100):
+                event = await asyncio.wait_for(
+                    client.read_event(),
+                    timeout=5,
+                )
+
+                if AudioChunk.is_type(event.type):
+                    saw_audio_before_stop = True
+                    break
+
+            assert saw_audio_before_stop
+
+            # Continue the LLM/text stream.
+            await client.write_event(
+                SynthesizeChunk(
+                    text="This is a test."
+                ).event()
+            )
+
+            # Home Assistant sends the full message as a compatibility
+            # Synthesize event during streaming. It must be ignored.
+            await client.write_event(
+                Synthesize(
+                    text="Hello world. This is a test."
+                ).event()
+            )
+
+            await client.write_event(
+                SynthesizeStop().event()
+            )
+
+            saw_audio_stop = False
+            saw_synthesize_stopped = False
+
+            for _ in range(200):
+                event = await asyncio.wait_for(
+                    client.read_event(),
+                    timeout=5,
+                )
+
+                if AudioStop.is_type(event.type):
+                    saw_audio_stop = True
+
+                elif SynthesizeStopped.is_type(event.type):
+                    saw_synthesize_stopped = True
+                    break
+
+            assert saw_audio_stop
+            assert saw_synthesize_stopped
+
+            generated_text = [
+                call[0]
+                for call in backend.generate_calls
+            ]
+
+            assert generated_text == [
+                "Hello world.",
+                "This is a test.",
+            ]
+
+    finally:
+        await _shutdown(server)
+
+
+
+async def test_streaming_input_emits_audio_before_stop(
+    server_settings,
+):
+    """A complete phrase should synthesize before input ends."""
+
+    server, port, backend = await _start_server(
+        server_settings
+    )
+
+    first_text = (
+        "This is a complete first sentence "
+        "that should stream immediately."
+    )
+
+    second_text = (
+        "This is the final sentence."
+    )
+
+    try:
+        async with AsyncTcpClient(
+            "127.0.0.1",
+            port,
+        ) as client:
+
+            await client.write_event(
+                SynthesizeStart().event()
+            )
+
+            event = await asyncio.wait_for(
+                client.read_event(),
+                timeout=5,
+            )
+
+            assert event is not None
+            assert AudioStart.is_type(event.type)
+
+            # This sentence exceeds the default 40-character minimum
+            # and ends naturally, so it should be synthesized now.
+            await client.write_event(
+                SynthesizeChunk(
+                    text=first_text + " "
+                ).event()
+            )
+
+            # Crucial assertion: get PCM BEFORE sending SynthesizeStop.
+            while True:
+                event = await asyncio.wait_for(
+                    client.read_event(),
+                    timeout=5,
+                )
+
+                assert event is not None
+
+                if AudioChunk.is_type(event.type):
+                    break
+
+            # Final text has no trailing whitespace; SynthesizeStop
+            # should flush it.
+            await client.write_event(
+                SynthesizeChunk(
+                    text=second_text
+                ).event()
+            )
+
+            # Wyoming streaming clients send this complete message for
+            # backwards compatibility. It must be ignored.
+            await client.write_event(
+                Synthesize(
+                    text=f"{first_text} {second_text}"
+                ).event()
+            )
+
+            await client.write_event(
+                SynthesizeStop().event()
+            )
+
+            saw_audio_stop = False
+            saw_synthesize_stopped = False
+
+            while not saw_synthesize_stopped:
+                event = await asyncio.wait_for(
+                    client.read_event(),
+                    timeout=5,
+                )
+
+                assert event is not None
+
+                if AudioStop.is_type(event.type):
+                    saw_audio_stop = True
+
+                elif SynthesizeStopped.is_type(event.type):
+                    saw_synthesize_stopped = True
+
+            assert saw_audio_stop
+
+            generated_text = [
+                text
+                for text, _kwargs
+                in backend.generate_calls
+            ]
+
+            assert generated_text == [
+                first_text,
+                second_text,
+            ]
+
     finally:
         await _shutdown(server)
