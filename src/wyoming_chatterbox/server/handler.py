@@ -79,21 +79,15 @@ class ChatterboxEventHandler(AsyncEventHandler):
             return True
 
         if SelectProgram.is_type(event.type):
-            await self._handle_select_program(
-                SelectProgram.from_event(event)
-            )
+            await self._handle_select_program(SelectProgram.from_event(event))
             return True
 
         if SynthesizeStart.is_type(event.type):
-            await self._handle_synthesize_start(
-                SynthesizeStart.from_event(event)
-            )
+            await self._handle_synthesize_start(SynthesizeStart.from_event(event))
             return True
 
         if SynthesizeChunk.is_type(event.type):
-            await self._handle_synthesize_chunk(
-                SynthesizeChunk.from_event(event)
-            )
+            await self._handle_synthesize_chunk(SynthesizeChunk.from_event(event))
             return True
 
         if SynthesizeStop.is_type(event.type):
@@ -107,9 +101,7 @@ class ChatterboxEventHandler(AsyncEventHandler):
             # message as a backwards-compatibility event. The chunks are
             # authoritative, so don't synthesize the response twice.
             if self._streaming:
-                logger.debug(
-                    "Ignoring compatibility Synthesize during active stream"
-                )
+                logger.debug("Ignoring compatibility Synthesize during active stream")
                 return True
 
             await self._handle_synthesize(synthesize)
@@ -129,7 +121,24 @@ class ChatterboxEventHandler(AsyncEventHandler):
         for variant, backend in self._backends.items():
             languages = backend.supported_languages()
 
+            # Always advertise the model's built-in/default voice.
+            #
+            # Home Assistant derives a Wyoming TTS provider's supported
+            # languages from its installed voices. Without at least one
+            # advertised voice, the provider appears in HA but cannot be
+            # selected in an Assist pipeline.
             voices = [
+                TtsVoice(
+                    name="default",
+                    description="Chatterbox default voice",
+                    attribution=_ATTRIBUTION,
+                    installed=True,
+                    version=None,
+                    languages=list(languages),
+                )
+            ]
+
+            voices.extend(
                 TtsVoice(
                     name=name,
                     description=f"Reference voice {name}",
@@ -139,7 +148,8 @@ class ChatterboxEventHandler(AsyncEventHandler):
                     languages=list(languages),
                 )
                 for name in voice_names
-            ]
+                if name != "default"
+            )
 
             programs.append(
                 TtsProgram(
@@ -163,18 +173,12 @@ class ChatterboxEventHandler(AsyncEventHandler):
     ) -> None:
         if self._streaming:
             await self.write_event(
-                Error(
-                    text="Cannot change TTS program during active synthesis"
-                ).event()
+                Error(text="Cannot change TTS program during active synthesis").event()
             )
             return
 
         if event.name not in self._backends:
-            await self.write_event(
-                Error(
-                    text=f"Unknown program: {event.name}"
-                ).event()
-            )
+            await self.write_event(Error(text=f"Unknown program: {event.name}").event())
             return
 
         self._active_variant = event.name
@@ -206,10 +210,7 @@ class ChatterboxEventHandler(AsyncEventHandler):
             if voice_event.language:
                 language = voice_event.language
 
-        if (
-            not voice
-            and self._settings.chatterbox_default_voice
-        ):
+        if not voice and self._settings.chatterbox_default_voice:
             voice = self._settings.chatterbox_default_voice
 
         return voice, language
@@ -243,9 +244,7 @@ class ChatterboxEventHandler(AsyncEventHandler):
             if not backend.is_loaded:
                 backend.load()
 
-            voice, language = self._resolve_voice_language(
-                event.voice
-            )
+            voice, language = self._resolve_voice_language(event.voice)
 
             sample_rate = backend.sample_rate
 
@@ -267,18 +266,12 @@ class ChatterboxEventHandler(AsyncEventHandler):
                     sample_rate,
                 )
 
-            await self.write_event(
-                AudioStop().event()
-            )
+            await self.write_event(AudioStop().event())
 
         except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "Synthesis error"
-            )
+            logger.exception("Synthesis error")
 
-            await self.write_event(
-                Error(text=str(exc)).event()
-            )
+            await self.write_event(Error(text=str(exc)).event())
 
     # -- streaming-text synthesis ----------------------------------------
 
@@ -288,9 +281,7 @@ class ChatterboxEventHandler(AsyncEventHandler):
     ) -> None:
         if self._streaming:
             await self.write_event(
-                Error(
-                    text="A streaming synthesis request is already active"
-                ).event()
+                Error(text="A streaming synthesis request is already active").event()
             )
             return
 
@@ -299,9 +290,7 @@ class ChatterboxEventHandler(AsyncEventHandler):
         if not backend.is_loaded:
             backend.load()
 
-        voice, language = self._resolve_voice_language(
-            event.voice
-        )
+        voice, language = self._resolve_voice_language(event.voice)
 
         self._streaming = True
         self._stream_voice = voice
@@ -336,8 +325,7 @@ class ChatterboxEventHandler(AsyncEventHandler):
         )
 
         logger.debug(
-            "Streaming synthesis started: "
-            "variant=%s voice=%s language=%s mode=%s",
+            "Streaming synthesis started: variant=%s voice=%s language=%s mode=%s",
             self._active_variant,
             voice,
             language,
@@ -348,95 +336,57 @@ class ChatterboxEventHandler(AsyncEventHandler):
         self,
         event: SynthesizeChunk,
     ) -> None:
-        if (
-            not self._streaming
-            or self._stream_queue is None
-        ):
+        if not self._streaming or self._stream_queue is None:
             await self.write_event(
-                Error(
-                    text=(
-                        "Received SynthesizeChunk "
-                        "without SynthesizeStart"
-                    )
-                ).event()
+                Error(text=("Received SynthesizeChunk without SynthesizeStart")).event()
             )
             return
 
         if self._stream_segmenter is None:
-            self._stream_parts.append(
-                event.text
-            )
+            self._stream_parts.append(event.text)
             return
 
-        for segment in self._stream_segmenter.feed(
-            event.text
-        ):
+        for segment in self._stream_segmenter.feed(event.text):
             logger.debug(
                 "Streaming segment ready: %r",
                 segment,
             )
 
-            await self._stream_queue.put(
-                segment
-            )
+            await self._stream_queue.put(segment)
 
     async def _handle_synthesize_stop(self) -> None:
-        if (
-            not self._streaming
-            or self._stream_queue is None
-        ):
+        if not self._streaming or self._stream_queue is None:
             await self.write_event(
-                Error(
-                    text=(
-                        "Received SynthesizeStop "
-                        "without active stream"
-                    )
-                ).event()
+                Error(text=("Received SynthesizeStop without active stream")).event()
             )
             return
 
         try:
             if self._stream_segmenter is not None:
                 for segment in self._stream_segmenter.flush():
-                    await self._stream_queue.put(
-                        segment
-                    )
+                    await self._stream_queue.put(segment)
 
             else:
-                text = "".join(
-                    self._stream_parts
-                ).strip()
+                text = "".join(self._stream_parts).strip()
 
                 if text:
-                    await self._stream_queue.put(
-                        text
-                    )
+                    await self._stream_queue.put(text)
 
             # End-of-input sentinel.
-            await self._stream_queue.put(
-                None
-            )
+            await self._stream_queue.put(None)
 
             if self._stream_task is not None:
                 await self._stream_task
 
         except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "Streaming synthesis error"
-            )
+            logger.exception("Streaming synthesis error")
 
-            await self.write_event(
-                Error(text=str(exc)).event()
-            )
+            await self.write_event(Error(text=str(exc)).event())
 
         finally:
-            await self.write_event(
-                AudioStop().event()
-            )
+            await self.write_event(AudioStop().event())
 
-            await self.write_event(
-                SynthesizeStopped().event()
-            )
+            await self.write_event(SynthesizeStopped().event())
 
             self._reset_stream_state()
 
@@ -476,6 +426,4 @@ class ChatterboxEventHandler(AsyncEventHandler):
         self._stream_queue = None
         self._stream_task = None
         self._stream_voice = None
-        self._stream_language = (
-            self._settings.chatterbox_default_language
-        )
+        self._stream_language = self._settings.chatterbox_default_language

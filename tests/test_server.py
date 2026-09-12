@@ -86,6 +86,11 @@ async def test_describe_returns_info(server_settings):
             assert program.name == "standard"
             voice_names = [v.name for v in program.voices]
             assert "alice" in voice_names
+        assert "default" in voice_names
+
+        default_voice = next(voice for voice in program.voices if voice.name == "default")
+        assert default_voice.installed
+        assert default_voice.languages
     finally:
         await _shutdown(server)
 
@@ -154,28 +159,19 @@ async def test_streaming_input_emits_audio_before_stop(server_settings):
             "127.0.0.1",
             port,
         ) as client:
-
             # Begin the streaming Wyoming TTS transaction.
-            await client.write_event(
-                SynthesizeStart().event()
-            )
+            await client.write_event(SynthesizeStart().event())
 
             event = await asyncio.wait_for(
                 client.read_event(),
                 timeout=5,
             )
 
-            assert AudioStart.is_type(
-                event.type
-            )
+            assert AudioStart.is_type(event.type)
 
             # Phrase 1 is complete, so it should be synthesized immediately
             # without waiting for SynthesizeStop.
-            await client.write_event(
-                SynthesizeChunk(
-                    text="Hello world. "
-                ).event()
-            )
+            await client.write_event(SynthesizeChunk(text="Hello world. ").event())
 
             saw_audio_before_stop = False
 
@@ -192,23 +188,13 @@ async def test_streaming_input_emits_audio_before_stop(server_settings):
             assert saw_audio_before_stop
 
             # Continue the LLM/text stream.
-            await client.write_event(
-                SynthesizeChunk(
-                    text="This is a test."
-                ).event()
-            )
+            await client.write_event(SynthesizeChunk(text="This is a test.").event())
 
             # Home Assistant sends the full message as a compatibility
             # Synthesize event during streaming. It must be ignored.
-            await client.write_event(
-                Synthesize(
-                    text="Hello world. This is a test."
-                ).event()
-            )
+            await client.write_event(Synthesize(text="Hello world. This is a test.").event())
 
-            await client.write_event(
-                SynthesizeStop().event()
-            )
+            await client.write_event(SynthesizeStop().event())
 
             saw_audio_stop = False
             saw_synthesize_stopped = False
@@ -229,125 +215,11 @@ async def test_streaming_input_emits_audio_before_stop(server_settings):
             assert saw_audio_stop
             assert saw_synthesize_stopped
 
-            generated_text = [
-                call[0]
-                for call in backend.generate_calls
-            ]
+            generated_text = [call[0] for call in backend.generate_calls]
 
             assert generated_text == [
                 "Hello world.",
                 "This is a test.",
-            ]
-
-    finally:
-        await _shutdown(server)
-
-
-
-async def test_streaming_input_emits_audio_before_stop(
-    server_settings,
-):
-    """A complete phrase should synthesize before input ends."""
-
-    server, port, backend = await _start_server(
-        server_settings
-    )
-
-    first_text = (
-        "This is a complete first sentence "
-        "that should stream immediately."
-    )
-
-    second_text = (
-        "This is the final sentence."
-    )
-
-    try:
-        async with AsyncTcpClient(
-            "127.0.0.1",
-            port,
-        ) as client:
-
-            await client.write_event(
-                SynthesizeStart().event()
-            )
-
-            event = await asyncio.wait_for(
-                client.read_event(),
-                timeout=5,
-            )
-
-            assert event is not None
-            assert AudioStart.is_type(event.type)
-
-            # This sentence exceeds the default 40-character minimum
-            # and ends naturally, so it should be synthesized now.
-            await client.write_event(
-                SynthesizeChunk(
-                    text=first_text + " "
-                ).event()
-            )
-
-            # Crucial assertion: get PCM BEFORE sending SynthesizeStop.
-            while True:
-                event = await asyncio.wait_for(
-                    client.read_event(),
-                    timeout=5,
-                )
-
-                assert event is not None
-
-                if AudioChunk.is_type(event.type):
-                    break
-
-            # Final text has no trailing whitespace; SynthesizeStop
-            # should flush it.
-            await client.write_event(
-                SynthesizeChunk(
-                    text=second_text
-                ).event()
-            )
-
-            # Wyoming streaming clients send this complete message for
-            # backwards compatibility. It must be ignored.
-            await client.write_event(
-                Synthesize(
-                    text=f"{first_text} {second_text}"
-                ).event()
-            )
-
-            await client.write_event(
-                SynthesizeStop().event()
-            )
-
-            saw_audio_stop = False
-            saw_synthesize_stopped = False
-
-            while not saw_synthesize_stopped:
-                event = await asyncio.wait_for(
-                    client.read_event(),
-                    timeout=5,
-                )
-
-                assert event is not None
-
-                if AudioStop.is_type(event.type):
-                    saw_audio_stop = True
-
-                elif SynthesizeStopped.is_type(event.type):
-                    saw_synthesize_stopped = True
-
-            assert saw_audio_stop
-
-            generated_text = [
-                text
-                for text, _kwargs
-                in backend.generate_calls
-            ]
-
-            assert generated_text == [
-                first_text,
-                second_text,
             ]
 
     finally:
